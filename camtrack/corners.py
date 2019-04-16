@@ -36,7 +36,7 @@ class _CornerStorageBuilder:
 
 WIN_SIZE = (15, 15)
 MAX_LEVEL = 2
-MAX_CORNERS = 1000
+MAX_CORNERS = 4000
 MIN_DISTANCE = 7
 QUALITY_LEVEL = 0.3
 BLOCK_SIZE = 7
@@ -65,6 +65,7 @@ def _build_impl(frame_sequence: pims.FramesSequence,
                                  sizes=np.full(n, MIN_DISTANCE))
 
     builder.set_corners_at_frame(0, frame_corners)
+    print('Corners:', len(frame_sequence))
     for frame, image_1 in enumerate(frame_sequence[1:], 1):
         print(frame, end=' ', flush=True)
         prev_img = np.uint8(image_0 * 255. / image_0.max())
