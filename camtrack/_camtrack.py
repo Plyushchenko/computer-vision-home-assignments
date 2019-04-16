@@ -433,6 +433,9 @@ def create_cli(track_and_calc_colors):
                 bgra = draw_residuals(grayscale, corner_storage[frame],
                                       point_cloud, camera_parameters,
                                       poses[frame])
+                h, w, _ = bgra.shape
+                scale = min(min(1., 768. / h), min(1., 1366. / w))
+                bgra = cv2.resize(bgra, (int(scale * w), int(scale * h)))
                 cv2.imshow('Frame', bgra)
                 key = chr(cv2.waitKey(20) & 0xFF)
                 if key == 'r':

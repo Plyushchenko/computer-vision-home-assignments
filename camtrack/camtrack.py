@@ -1,7 +1,4 @@
 #! /usr/bin/env python3
-import random
-
-import cv2
 
 from _camtrack import _remove_correspondences_with_ids
 
@@ -13,27 +10,27 @@ from typing import List, Tuple
 
 import numpy as np
 import sortednp as snp
-
-from corners import CornerStorage
-from data3d import CameraParameters, PointCloud, Pose
 import frameseq
 from _camtrack import *
+from corners import CornerStorage
+from data3d import CameraParameters, PointCloud, Pose
+import cv2
 
 
 def _initialize_with_two_frames(corners_1, corners_2, intrinsic_mat, triangulation_parameters):
     correspondences = build_correspondences(corners_1, corners_2)
     if len(correspondences.ids) <= 5:
-        return 0, None, None, None
+        return None, None, None
     E, mask_E = cv2.findEssentialMat(correspondences.points_1, correspondences.points_2, intrinsic_mat,
                                      method=cv2.RANSAC, prob=0.999, threshold=1.0)
     if E is None or E.shape != (3, 3):
-        return 0, None, None, None
+        return None, None, None
     fundamental_inliers = np.sum(mask_E)
     H, mask_H = cv2.findHomography(correspondences.points_1, correspondences.points_2, method=cv2.RANSAC,
                                    ransacReprojThreshold=1.0, confidence=0.999)
     homography_inliers = np.sum(mask_H)
-    if fundamental_inliers / homography_inliers < 1:
-        return 0, None, None, None
+    if fundamental_inliers / homography_inliers < 1.2:
+        return None, None, None
     correspondences = _remove_correspondences_with_ids(correspondences, np.where(mask_E == 0)[0])
     best_points, best_ids, best_pose = None, None, None
     R1, R2, t_d = cv2.decomposeEssentialMat(E)
@@ -45,94 +42,52 @@ def _initialize_with_two_frames(corners_1, corners_2, intrinsic_mat, triangulati
             intrinsic_mat,
             triangulation_parameters,
         )
-        if best_points is None or len(points) > len(best_points):
+        if best_ids is None or len(ids) > len(best_ids):
             best_points, best_ids, best_pose = points, ids, pose
-    return len(best_points), best_points, best_ids, best_pose
+    return best_points, best_ids, best_pose
 
 
 def _initialize_with_storage(corner_storage, intrinsic_mat, triangulation_parameters):
-    print("init...")
-    best_size = 0
-    best_index = -1
+    best_index, best_points, best_ids, best_pose = None, None, None, None
     for i in range(1, len(corner_storage)):
-        size, _, _, _ = _initialize_with_two_frames(corner_storage[0], corner_storage[i], intrinsic_mat,
-                                                    triangulation_parameters)
-        print("init 0 and", i, "size =", size, "best_size =", best_size, "best_index =", best_index, flush=True)
-        if size > best_size:
-            best_index = i
-            best_size = size
-    if best_index == -1:
-        return -1, None, None, None, None, None
-    init_size, init_points, init_ids, init_pose = _initialize_with_two_frames(corner_storage[0],
-                                                                              corner_storage[best_index], intrinsic_mat,
-                                                                              triangulation_parameters)
-    point_cloud_builder = PointCloudBuilder()
-    point_cloud_builder.add_points(init_ids, init_points)
-    return best_index, init_size, init_points, init_ids, init_pose, point_cloud_builder
-
-
-def solvePnPRansac(objectPoints, imagePoints, cameraMatrix, distCoeffs):
-    ITERATIONS = 218
-    best_inliers = None
-    best_size = 0
-    best_R = None
-    best_t = None
-
-    for i in range(ITERATIONS):
-        sample = random.sample(range(len(objectPoints)), 4)
-        solve_result, R, t = cv2.solvePnP(objectPoints[sample], imagePoints[sample], cameraMatrix,
-                                          distCoeffs=distCoeffs)
-        view_mat = rodrigues_and_translation_to_view_mat3x4(R, t)
-        inliers = calc_inlier_indices(objectPoints, imagePoints, cameraMatrix @ view_mat, 1.0)
-        size = len(inliers)
-        if size > best_size:
-            best_size = size
-            best_inliers = inliers
-            best_R = R
-            best_t = t
-    if best_inliers is None:
-        return False, best_R, best_t, best_inliers
-    return True, best_R, best_t, best_inliers
-
-
-def _track_camera_parametrized(corner_storage: CornerStorage, intrinsic_mat: np.ndarray,
-                               triangulation_parameters: TriangulationParameters):
-    view_mats = [eye3x4()] * len(corner_storage)
-    init_index, init_size, init_points, init_ids, init_pose, point_cloud_builder = _initialize_with_storage(
-        corner_storage, intrinsic_mat, triangulation_parameters)
-    if init_index == -1:
-        return None, None
-    for i in range(1, len(corner_storage)):
-        print("frame", i, "/", len(corner_storage))
-        corners = corner_storage[i]
-        if i == init_index:
-            view_mats[i] = pose_to_view_mat3x4(init_pose)
+        points, ids, pose = _initialize_with_two_frames(corner_storage[0], corner_storage[i], intrinsic_mat,
+                                                        triangulation_parameters)
+        if ids is None:
             continue
-        else:
-            _, (object_ids, image_ids) = snp.intersect(
-                point_cloud_builder.ids.flatten(),
-                corners.ids.flatten(),
-                indices=True
-            )
-            if len(object_ids) < 4:
-                print("SMALL OBJECT_POINTS")
-                return None, None
-            object_points = point_cloud_builder.points[object_ids]
-            image_points = corners.points[image_ids]
-            solve_result, R, t, inliers = solvePnPRansac(
-                #object_points.reshape((len(object_points), 1, 3)),
-                #image_points.reshape((len(image_points), 1, 2)),
-                object_points,
-                image_points,
-                cameraMatrix=intrinsic_mat,
-                distCoeffs=None
-            )
-            if not solve_result:
-                print("NOT SOLVE RESULT")
-                return None, None
-            # print(inliers.tolist(), "inliers")
-            view_mats[i] = rodrigues_and_translation_to_view_mat3x4(R, t)
-            res_ids = np.delete(point_cloud_builder.ids[object_ids], inliers, axis=0)
+        if best_ids is None or len(ids) > len(best_ids):
+            best_index, best_points, best_ids, best_pose = i, points, ids, pose
+            print("init 0 and", i, "size =", len(ids), "best_size =", len(best_ids), flush=True)
+    if best_ids is None:
+        return None, None, None, None
+    point_cloud_builder = PointCloudBuilder()
+    point_cloud_builder.add_points(best_ids, best_points)
+    return best_index, best_pose, point_cloud_builder
+
+
+def _track_camera_with_parameters(corner_storage, intrinsic_mat, triangulation_parameters):
+    view_mats = [eye3x4()]
+    init_index, init_pose, point_cloud_builder = _initialize_with_storage(corner_storage, intrinsic_mat,
+                                                                          triangulation_parameters)
+    for i in range(1, len(corner_storage)):
+        print(i, end=' ', flush=True)
+        if i == init_index:
+            view_mats.append(pose_to_view_mat3x4(init_pose))
+            continue
+        _, (object_ids, image_ids) = snp.intersect(point_cloud_builder.ids.flatten(), corner_storage[i].ids.flatten(),
+                                                   indices=True)
+        if len(object_ids) < 4:
+            return None, None
+        object_points = point_cloud_builder.points[object_ids]
+        image_points = corner_storage[i].points[image_ids]
+        solve_result, R, t, inliers = cv2.solvePnPRansac(object_points.reshape((len(object_points), 1, 3)),
+                                                         image_points.reshape((len(image_points), 1, 2)),
+                                                         cameraMatrix=intrinsic_mat, distCoeffs=None)
+        if not solve_result:
+            return None, None
+
+        view_mats.append(rodrigues_and_translation_to_view_mat3x4(R, t))
+
+        res_ids = np.delete(point_cloud_builder.ids[object_ids], inliers, axis=0)
         new_points = 0
         for j in range(i):
             correspondences = build_correspondences(corner_storage[j], corner_storage[i], ids_to_remove=res_ids)
@@ -154,18 +109,15 @@ def _track_camera_parametrized(corner_storage: CornerStorage, intrinsic_mat: np.
 def _track_camera(corner_storage: CornerStorage,
                   intrinsic_mat: np.ndarray) \
         -> Tuple[List[np.ndarray], PointCloudBuilder]:
-    for angle_deg in [7.0, 5.0, 3.0, 1.0, 0.5, 0.1]:
-        print("angle_deg =", angle_deg)
-        triangulation_parameters = TriangulationParameters(
-            max_reprojection_error=1.0,
-            min_triangulation_angle_deg=angle_deg,
-            min_depth=0.1
-        )
-        view_mats, point_clout_builder = _track_camera_parametrized(
-            corner_storage, intrinsic_mat, triangulation_parameters
-        )
-        if view_mats is not None and point_clout_builder is not None:
-            return view_mats, point_clout_builder
+    for min_triangulation_angle_deg in [5.0, 3.0, 1.0, 0.25]:
+        triangulation_parameters = TriangulationParameters(max_reprojection_error=1.0,
+                                                           min_triangulation_angle_deg=min_triangulation_angle_deg,
+                                                           min_depth=0.1)
+        view_mats, point_cloud_builder = _track_camera_with_parameters(corner_storage, intrinsic_mat,
+                                                                       triangulation_parameters)
+        if view_mats is not None:
+            return view_mats, point_cloud_builder
+
     return [], PointCloudBuilder()
 
 
