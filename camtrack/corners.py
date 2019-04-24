@@ -1,5 +1,5 @@
 #! /usr/bin/env python3
-
+# https://github.com/KatyaKos/computer_vision/blob/cbab8bc0aefdc2ce5642879bea0250a9c2ff7eae/camtrack/corners.py
 __all__ = [
     'FrameCorners',
     'CornerStorage',
@@ -34,68 +34,90 @@ class _CornerStorageBuilder:
         return StorageImpl(item[1] for item in sorted(self._corners.items()))
 
 
+WIN_SIZE = (15, 15)
+MAX_LEVEL = 2
+MAX_CORNERS = 4000
+MIN_DISTANCE = 7
+QUALITY_LEVEL = 0.3
+BLOCK_SIZE = 7
+
+
 def _build_impl(frame_sequence: pims.FramesSequence,
                 builder: _CornerStorageBuilder) -> None:
     image_0 = frame_sequence[0]
-    max_corners = 1500
-    quality_level = 0.05
-    min_distance = 6
-    corner_coordinates = cv2.goodFeaturesToTrack(
-        image=image_0,
-        maxCorners=max_corners,
-        qualityLevel=quality_level,
-        minDistance=min_distance,
-    )
-    prev_last_id = last_id = len(corner_coordinates)
-    corners = FrameCorners(
-        ids=np.array(range(last_id)),
-        points=corner_coordinates,
-        sizes=np.full(last_id, min_distance)
-    )
-    builder.set_corners_at_frame(0, corners)
+    lks = dict(winSize=WIN_SIZE,
+               maxLevel=MAX_LEVEL,
+               criteria=(cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 10, 0.03))
+
+    features = dict(maxCorners=MAX_CORNERS,
+                    qualityLevel=QUALITY_LEVEL,
+                    minDistance=MIN_DISTANCE,
+                    blockSize=BLOCK_SIZE)
+    corners = cv2.goodFeaturesToTrack(image=image_0,
+                                      mask=None,
+                                      **features)
+    n = len(corners)
+    ids = np.array(range(n))
+    next_corner = n
+    prev_corner = n
+    frame_corners = FrameCorners(ids=ids,
+                                 points=corners,
+                                 sizes=np.full(n, MIN_DISTANCE))
+
+    builder.set_corners_at_frame(0, frame_corners)
+    print('Corners:', len(frame_sequence))
     for frame, image_1 in enumerate(frame_sequence[1:], 1):
-        next_pts, status, err = cv2.calcOpticalFlowPyrLK(
-            prevImg=np.uint8(image_0 / image_0.max() * 255.0),
-            nextImg=np.uint8(image_1 / image_1.max() * 255.0),
-            prevPts=corner_coordinates,
-            nextPts=None,
-        )
-        #ids = np.argsort(err.flatten())[:int(len(err) * 0.95)]
-        ids = np.where(status == 1)[0]
-        corner_coordinates = next_pts[ids]
-        additional_corner_coordinates = []
-        if len(corner_coordinates) < max_corners:
-            potential_corner_coordinates = cv2.goodFeaturesToTrack(
-                image=image_1,
-                maxCorners=max_corners,
-                qualityLevel=quality_level,
-                minDistance=min_distance,
+        print(frame, end=' ', flush=True)
+        prev_img = np.uint8(image_0 * 255. / image_0.max())
+        next_img = np.uint8(image_1 * 255. / image_1.max())
+        point_0, _, _ = cv2.calcOpticalFlowPyrLK(prev_img, next_img, corners, None, **lks)
+        point_1, _, _ = cv2.calcOpticalFlowPyrLK(next_img, prev_img, point_0, None, **lks)
+        delta = np.abs(corners - point_1).reshape(-1, 2).max(-1)
+        pred = delta < 1
+        ids = ids[pred]
+        corners = point_0[pred]
+        n = len(corners)
+
+        if n < MAX_CORNERS:
+            mask = np.full(image_1.shape, 255, dtype=np.uint8)
+            for coord in corners:
+                cv2.circle(mask, (coord[0][0], coord[0][1]), MIN_DISTANCE, 0, -1)
+
+            candidates = cv2.goodFeaturesToTrack(image_1, mask=mask, **features)
+            if candidates is None:
+                frame_corners = FrameCorners(
+                    ids=ids,
+                    points=corners,
+                    sizes=np.full(n, MIN_DISTANCE),
+                )
+                builder.set_corners_at_frame(frame, frame_corners)
+                image_0 = image_1
+                continue
+
+            new_corners = []
+            delta_n = 0
+            for coord in candidates:
+                if n + delta_n < MAX_CORNERS:
+                    new_corners.append(coord)
+                    next_corner += 1
+                    delta_n += 1
+            corners = np.concatenate([corners, new_corners])
+            n = len(corners)
+            ids = np.concatenate([ids, np.array(range(prev_corner, next_corner))])
+            prev_corner = next_corner
+            frame_corners = FrameCorners(
+                ids=ids,
+                points=corners,
+                sizes=np.full(n, MIN_DISTANCE),
             )
-            for potential_corner_coordinate in potential_corner_coordinates:
-                distances = np.linalg.norm(potential_corner_coordinate - corner_coordinates, axis=1)
-                if np.linalg.norm(distances, axis=1).min() >= min_distance:
-                    additional_corner_coordinates.append(potential_corner_coordinate)
-                    last_id += 1
-                if len(corner_coordinates) + len(additional_corner_coordinates) >= max_corners:
-                    break
-        if len(additional_corner_coordinates) != 0:
-            corner_coordinates = np.concatenate([corner_coordinates, additional_corner_coordinates])
-            ids = np.concatenate([ids, np.array(range(prev_last_id, last_id))])
-            prev_last_id = last_id
-        corners = FrameCorners(
-            ids=ids,
-            points=corner_coordinates,
-            sizes=np.full(len(corner_coordinates), min_distance),
-        )
-        builder.set_corners_at_frame(frame, corners)
-        image_0 = image_1
+            builder.set_corners_at_frame(frame, frame_corners)
+            image_0 = image_1
 
 
 def build(frame_sequence: pims.FramesSequence,
           progress: bool = True) -> CornerStorage:
     """
     Build corners for all frames of a frame sequence.
-
     :param frame_sequence: grayscale float32 frame sequence.
     :param progress: enable/disable building progress bar.
     :return: corners for all frames of given sequence.
@@ -112,4 +134,4 @@ def build(frame_sequence: pims.FramesSequence,
 
 
 if __name__ == '__main__':
-    create_cli(build)()  # pylint:disable=no-value-for-parameter
+    create_cli(build)() # pylint:disable=no-value-for-parameter
