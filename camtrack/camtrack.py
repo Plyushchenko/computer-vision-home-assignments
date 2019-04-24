@@ -1,6 +1,7 @@
 #! /usr/bin/env python3
 
 from _camtrack import _remove_correspondences_with_ids
+from ba import run_bundle_adjustment
 
 __all__ = [
     'track_and_calc_colors'
@@ -72,6 +73,7 @@ def _track_camera_with_parameters(corner_storage, intrinsic_mat, triangulation_p
         print(i, end=' ', flush=True)
         if i == init_index:
             view_mats.append(pose_to_view_mat3x4(init_pose))
+            print(flush=True)
             continue
         _, (object_ids, image_ids) = snp.intersect(point_cloud_builder.ids.flatten(), corner_storage[i].ids.flatten(),
                                                    indices=True)
@@ -102,7 +104,19 @@ def _track_camera_with_parameters(corner_storage, intrinsic_mat, triangulation_p
             )
             point_cloud_builder.add_points(ids, points)
             new_points += len(points)
-        print(new_points, "new points,", len(point_cloud_builder.points), "points in point cloud builder")
+        if new_points != 0:
+            print(new_points, "new points,", len(point_cloud_builder.points), "points in point cloud builder", flush=True)
+        ba_frames = 20
+        ba_step = 10
+        if i < ba_frames or i % ba_step != 0:
+            continue
+        view_mats[-ba_frames:] = run_bundle_adjustment(
+            intrinsic_mat=intrinsic_mat,
+            list_of_corners=list(corner_storage)[-ba_frames:],
+            max_inlier_reprojection_error=triangulation_parameters.max_reprojection_error,
+            view_mats=view_mats[-ba_frames:],
+            pc_builder=point_cloud_builder)
+
     return view_mats, point_cloud_builder
 
 
